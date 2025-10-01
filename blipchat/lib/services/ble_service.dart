@@ -158,6 +158,7 @@ class BleService {
     // Note: Flutter Blue Plus doesn't support advertising directly
     // This would require platform-specific implementation
     // For now, we'll use peripheral mode simulation
+    
     print("Starting advertising (simulated)");
   }
 
