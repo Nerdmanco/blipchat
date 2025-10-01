@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:crypto/crypto.dart';
@@ -10,12 +11,16 @@ class BleService {
   static const String serviceUuid = "12345678-1234-5678-9012-123456789abc";
   static const String characteristicUuid = "87654321-4321-8765-2109-cba987654321";
   
+  // Method channel for native BLE advertising
+  static const MethodChannel _advertisingChannel = MethodChannel('blipchat/ble_advertising');
+  
   final StreamController<Message> _messageStreamController = StreamController<Message>.broadcast();
   final StreamController<bool> _connectionStatusController = StreamController<bool>.broadcast();
   final List<BluetoothDevice> _connectedDevices = [];
   final List<Message> _messages = [];
   
   bool _isActive = false;
+  bool _isAdvertising = false;
   BluetoothCharacteristic? _writeCharacteristic;
   late String _deviceUsername;
 
@@ -28,6 +33,36 @@ class BleService {
   BleService() {
     _generateRandomUsername();
     _initializeBluetooth();
+    _setupMethodChannelHandlers();
+  }
+
+  void _setupMethodChannelHandlers() {
+    _advertisingChannel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'onMessageReceived':
+          // Handle both JSON string and Map formats
+          if (call.arguments is String) {
+            final messageJson = call.arguments as String;
+            try {
+              final messageData = jsonDecode(messageJson) as Map<String, dynamic>;
+              _handleReceivedMessageFromAdvertising(messageData);
+            } catch (e) {
+              print("Error parsing message JSON: $e");
+            }
+          } else if (call.arguments is Map<String, dynamic>) {
+            final messageData = call.arguments as Map<String, dynamic>;
+            _handleReceivedMessageFromAdvertising(messageData);
+          }
+          break;
+        case 'onAdvertisingStateChanged':
+          final isAdvertising = call.arguments as bool;
+          _isAdvertising = isAdvertising;
+          print("Advertising state changed: $isAdvertising");
+          break;
+        default:
+          break;
+      }
+    });
   }
 
   void _generateRandomUsername() {
@@ -121,6 +156,7 @@ class BleService {
       _connectionStatusController.add(false);
       
       await _stopScanning();
+      await _stopAdvertising();
       await _disconnectAllDevices();
     } catch (e) {
       print("Error deactivating BLE: $e");
@@ -155,14 +191,35 @@ class BleService {
   }
 
   Future<void> _startAdvertising() async {
-    // Note: Flutter Blue Plus doesn't support advertising directly
-    // This would require platform-specific implementation
-    // For now, we'll use peripheral mode simulation
-    
-    print("Starting advertising (simulated)");
+    try {
+      final result = await _advertisingChannel.invokeMethod('startAdvertising', {
+        'serviceUuid': serviceUuid,
+        'characteristicUuid': characteristicUuid,
+        'deviceName': 'BlipChat-$_deviceUsername',
+      });
+      
+      if (result == true) {
+        _isAdvertising = true;
+        print("BLE advertising started successfully");
+      } else {
+        print("Failed to start BLE advertising");
+      }
+    } catch (e) {
+      print("Error starting advertising: $e");
+      // Fallback to simulation mode
+      print("Starting advertising (simulated)");
+    }
   }
 
-  Future<void> _connectToDevice(BluetoothDevice device) async {
+  Future<void> _stopAdvertising() async {
+    try {
+      await _advertisingChannel.invokeMethod('stopAdvertising');
+      _isAdvertising = false;
+      print("BLE advertising stopped");
+    } catch (e) {
+      print("Error stopping advertising: $e");
+    }
+  }  Future<void> _connectToDevice(BluetoothDevice device) async {
     try {
       if (_connectedDevices.contains(device)) return;
 
@@ -207,7 +264,10 @@ class BleService {
   }
 
   Future<void> sendMessage(String content) async {
-    if (!_isActive || content.trim().isEmpty) return;
+    if (!_isActive || content.trim().isEmpty) {
+      print("Cannot send message: isActive=$_isActive, content='${content.trim()}'");
+      return;
+    }
 
     try {
       final message = Message(
@@ -218,25 +278,42 @@ class BleService {
         isLocal: true,
       );
 
+      print("Sending message: ${message.username}: ${message.content}");
+
       // Add to local messages
       _messages.add(message);
       _messageStreamController.add(message);
+      print("Added local message to stream");
 
-      // Send to connected devices
+      // Send via traditional BLE connection
       if (_writeCharacteristic != null) {
         final messageJson = jsonEncode(message.toJson());
         final messageBytes = utf8.encode(messageJson);
         
         try {
           await _writeCharacteristic!.write(messageBytes);
+          print("Sent via BLE characteristic");
         } catch (e) {
           print("Error writing to characteristic: $e");
         }
       }
 
+      // Send via BLE advertising (new method)
+      if (_isAdvertising) {
+        try {
+          print("Sending via advertising channel...");
+          await _advertisingChannel.invokeMethod('sendMessage', message.toJson());
+          print("Sent via advertising channel");
+        } catch (e) {
+          print("Error sending message via advertising: $e");
+        }
+      } else {
+        print("Not advertising, cannot send via advertising channel");
+      }
+
       // Simulate sending to other devices (for testing when only one device)
-      if (_connectedDevices.isEmpty) {
-        print("No connected devices - message sent locally only");
+      if (_connectedDevices.isEmpty && !_isAdvertising) {
+        print("No connected devices and not advertising - message sent locally only");
       }
     } catch (e) {
       print("Error sending message: $e");
@@ -256,6 +333,25 @@ class BleService {
       }
     } catch (e) {
       print("Error handling received message: $e");
+    }
+  }
+
+  void _handleReceivedMessageFromAdvertising(Map<String, dynamic> messageData) {
+    try {
+      print("Received message from advertising: $messageData");
+      final message = Message.fromJson(messageData);
+      
+      // Don't add messages from ourselves
+      if (message.username != _deviceUsername) {
+        print("Adding message from ${message.username}: ${message.content}");
+        _messages.add(message);
+        _messageStreamController.add(message);
+        print("Message added to stream. Total messages: ${_messages.length}");
+      } else {
+        print("Ignoring message from self: ${message.username}");
+      }
+    } catch (e) {
+      print("Error handling received message from advertising: $e");
     }
   }
 

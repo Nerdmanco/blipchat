@@ -11,6 +11,7 @@ class HomeViewModel extends BaseViewModel {
   
   StreamSubscription? _messageSubscription;
   StreamSubscription? _connectionSubscription;
+  Timer? _periodicRefreshTimer;
   
   bool _isConnected = false;
   List<Message> _messages = [];
@@ -22,9 +23,15 @@ class HomeViewModel extends BaseViewModel {
   List<Message> get messages => _messages;
   
   Stream<List<Message>> get messagesStream => _bleService.messageStream.map((newMessage) {
+    print("Stream received message: ${newMessage.username}: ${newMessage.content}");
     if (!_messages.any((msg) => msg.id == newMessage.id)) {
       _messages.add(newMessage);
+      print("Added to UI list. Total messages: ${_messages.length}");
+      // Sort messages by timestamp to maintain chronological order
+      _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
       rebuildUi();
+    } else {
+      print("Message already exists in list");
     }
     return List.from(_messages);
   });
@@ -48,9 +55,44 @@ class HomeViewModel extends BaseViewModel {
       }
     });
 
+    // Start periodic refresh timer (every 10 seconds)
+    _startPeriodicRefresh();
+
     // Initialize with current state
     _isConnected = _bleService.isActive;
     _messages = List.from(_bleService.messages);
+  }
+
+  void _startPeriodicRefresh() {
+    _periodicRefreshTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      _refreshMessageList();
+    });
+  }
+
+  void _refreshMessageList() {
+    print("Periodic refresh: Syncing message list with BLE service");
+    final bleMessages = _bleService.messages;
+    bool hasNewMessages = false;
+
+    // Check for new messages from BLE service
+    for (final bleMessage in bleMessages) {
+      if (!_messages.any((msg) => msg.id == bleMessage.id)) {
+        _messages.add(bleMessage);
+        hasNewMessages = true;
+        print("Added missed message during refresh: ${bleMessage.username}: ${bleMessage.content}");
+      }
+    }
+
+    // Remove messages that no longer exist in BLE service (cleanup)
+    _messages.removeWhere((msg) => !bleMessages.any((bleMsg) => bleMsg.id == msg.id));
+
+    // Sort messages by timestamp to maintain order
+    _messages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+    if (hasNewMessages || _messages.length != bleMessages.length) {
+      print("Message list updated during refresh. UI messages: ${_messages.length}, BLE messages: ${bleMessages.length}");
+      rebuildUi();
+    }
   }
 
   Future<void> toggleConnection() async {
@@ -84,6 +126,9 @@ class HomeViewModel extends BaseViewModel {
       await _bleService.sendMessage(messageText);
       _messageController.clear();
       
+      // Refresh message list after sending to ensure it appears
+      _refreshMessageList();
+      
       // Scroll to bottom after sending message (if needed)
       // This would be handled in the UI layer
     } catch (e) {
@@ -92,11 +137,17 @@ class HomeViewModel extends BaseViewModel {
     }
   }
 
+  // Manual refresh method for UI triggers
+  void refreshMessages() {
+    _refreshMessageList();
+  }
+
   @override
   void dispose() {
     _messageController.dispose();
     _messageSubscription?.cancel();
     _connectionSubscription?.cancel();
+    _periodicRefreshTimer?.cancel();
     super.dispose();
   }
 }
